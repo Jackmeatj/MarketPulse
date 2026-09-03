@@ -1,3 +1,6 @@
+Terminal 1: caffeinate -dimsu
+Terminal 2: cloudflared tunnel --url http://localhost:80
+
 # MarketPulse Workflow
 
 ## 1. Purpose and Current Scope

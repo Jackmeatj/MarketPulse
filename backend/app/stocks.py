@@ -23,7 +23,7 @@ SECTOR_STOCKS: dict[str, list[str]] = {
     "Metal": ["TATASTEEL", "JSWSTEEL", "HINDALCO", "VEDL", "JINDALSTEL", "COALINDIA", "NMDC", "SAIL", "NATIONALUM", "HINDZINC", "APLAPOLLO", "RATNAMANI", "WELCORP", "MOIL", "HINDCOPPER", "JSL", "ADANIENT", "JINDALSAW", "GPIL", "MAITHANALL"],
     "Realty": ["DLF", "LODHA", "GODREJPROP", "OBEROIRLTY", "PHOENIXLTD", "PRESTIGE", "BRIGADE", "SOBHA", "SUNTECK", "ANANTRAJ", "SIGNATURE", "KOLTEPATIL", "MAHLIFE", "RUSTOMJEE", "IBREALEST", "RAYMOND", "ARVSMART", "EMBASSY", "BROOKFIELD", "INDIABULLS"],
     "PSU Bank": ["SBIN", "BANKBARODA", "PNB", "CANBK", "UNIONBANK", "INDIANB", "BANKINDIA", "MAHABANK", "IOB", "UCOBANK", "CENTRALBK", "PSB", "J&KBANK", "SURYODAY", "JAMNAAUTO"],
-    "Private Bank": ["HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "INDUSINDBK", "IDFCFIRSTB", "FEDERALBNK", "RBLBANK", "BANDHANBNK", "YESBANK", "KARURVYSYA", "DCBBANK", "CSBBANK", "EQUITASBNK", "UJJIVANSFB"],
+    "Private Bank": ["HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "INDUSINDBK", "IDFCFIRSTB", "FEDERALBNK", "RBLBANK", "BANDHANBNK", "YESBANK", "KARURVYSYA", "DCBBANK", "CSBBANK", "EQUITASBNK", "UJJIVANSFB", "SOUTHBANK", "CUB", "TMB", "KTKBANK", "DHANBANK"],
     "Oil & Gas": ["RELIANCE", "ONGC", "IOC", "BPCL", "GAIL", "HINDPETRO", "OIL", "PETRONET", "IGL", "MGL", "GUJGASLTD", "ATGL", "AEGISLOG", "CASTROLIND", "CHENNPETRO", "MRPL", "GSPL", "BORORENEW", "FINEORG", "KALYANKJIL"],
     "Power": ["NTPC", "POWERGRID", "ADANIGREEN", "TATAPOWER", "JSWENERGY", "ADANIENSOL", "TORNTPOWER", "NHPC", "SJVN", "NLCINDIA", "CESC", "RPOWER", "INOXWIND", "SUZLON", "WAAREEENER", "KPI GREEN", "JPPOWER", "RPOWER", "GMRINFRA", "IREDA"],
     "Consumer Durables": ["TITAN", "HAVELLS", "VOLTAS", "DIXON", "KAYNES", "AMBER", "WHIRLPOOL", "CROMPTON", "VGUARD", "BLUESTARCO", "VOLTAMP", "RAJESHEXPO", "KAJARIACER", "CENTURYPLY", "BATAINDIA", "RELAXO", "CAMPUS", "METROBRAND", "PGEL", "IFBIND"],
@@ -41,11 +41,14 @@ def yahoo_history(symbol: str) -> dict[str, Any]:
     response.raise_for_status()
     result = response.json()["chart"]["result"][0]
     meta = result["meta"]
-    closes = [float(value) for value in result["indicators"]["quote"][0]["close"] if value is not None]
-    volumes = [float(value) for value in result["indicators"]["quote"][0]["volume"] if value is not None]
+    quote_data = result["indicators"]["quote"][0]
+    closes = [float(value) for value in quote_data["close"] if value is not None]
+    highs = [float(value) for value in quote_data["high"] if value is not None]
+    lows = [float(value) for value in quote_data["low"] if value is not None]
+    volumes = [float(value) for value in quote_data["volume"] if value is not None]
     if len(closes) < 20:
         raise ValueError("Insufficient daily candle history")
-    return {"symbol": symbol, "close": closes[-1], "previous": closes[-2], "closes": closes, "volumes": volumes, "timestamp": datetime.fromtimestamp(meta.get("regularMarketTime", result["timestamp"][-1]), timezone.utc).isoformat(), "source": f"Yahoo Finance ({symbol}.NS)"}
+    return {"symbol": symbol, "close": closes[-1], "previous": closes[-2], "closes": closes, "highs": highs, "lows": lows, "volumes": volumes, "timestamp": datetime.fromtimestamp(meta.get("regularMarketTime", result["timestamp"][-1]), timezone.utc).isoformat(), "source": f"Yahoo Finance ({symbol}.NS)"}
 
 
 def ema(values: list[float], period: int) -> float:
@@ -67,10 +70,22 @@ def rsi(values: list[float], period: int = 14) -> float:
     return 100 - (100 / (1 + average_gain / average_loss))
 
 
+def atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float | None:
+    if len(highs) != len(lows) or len(lows) != len(closes) or len(closes) <= period:
+        return None
+    true_ranges = [
+        max(highs[index] - lows[index], abs(highs[index] - closes[index - 1]), abs(lows[index] - closes[index - 1]))
+        for index in range(1, len(closes))
+    ]
+    return mean(true_ranges[-period:]) if len(true_ranges) >= period else None
+
+
 def stock_metrics(symbol: str, sector_return: float, benchmark_return: float, market_direction: str) -> dict[str, Any] | None:
     try:
         history = yahoo_history(symbol)
         closes = history["closes"]
+        highs = history["highs"]
+        lows = history["lows"]
         returns = [(closes[index] / closes[index - 1] - 1) * 100 for index in range(1, len(closes))]
         change_1d = (closes[-1] / closes[-2] - 1) * 100
         change_5d = (closes[-1] / closes[-6] - 1) * 100
@@ -83,11 +98,16 @@ def stock_metrics(symbol: str, sector_return: float, benchmark_return: float, ma
         volatility = pstdev(returns[-20:]) * sqrt(252)
         volatility_score = max(0, min(100, round(100 - volatility * 4)))
         velocity = (closes[-1] - closes[-6]) / 5
+        vwap_window = min(len(closes), 20)
+        vwap_volume = sum(history["volumes"][-vwap_window:])
+        vwap = sum(close * volume for close, volume in zip(closes[-vwap_window:], history["volumes"][-vwap_window:])) / vwap_volume if vwap_volume else None
+        macd = ema(closes, 12) - ema(closes, 26) if len(closes) >= 26 else None
+        atr_value = atr(highs, lows, closes)
         score = round(trend_score * .25 + momentum_score * .25 + max(0, min(100, 50 + relative_strength * 3)) * .2 + liquidity * .1 + volatility_score * .1 + (65 if change_1d >= sector_return else 35) * .1)
         support = min(closes[-20:])
         resistance = max(closes[-20:])
         action = "Breakout" if closes[-1] >= resistance * .995 else "Reversal" if change_1d * change_5d < 0 else "Trend continuation"
-        return {"symbol": symbol, "sector_alignment": round(change_1d - sector_return, 2), "market_direction": market_direction, "price": history["close"], "change_percent": round(change_1d, 2), "trend": trend_score, "strength": round(max(0, min(100, 50 + relative_strength * 3))), "momentum": momentum_score, "volume": round(volume_ratio, 2), "velocity": round(velocity, 2), "relative_strength": round(relative_strength, 2), "liquidity": liquidity, "volatility": round(volatility, 2), "support": round(support, 2), "resistance": round(resistance, 2), "price_action": action, "score": score, "timestamp": history["timestamp"], "source": history["source"], "freshness": "live"}
+        return {"symbol": symbol, "sector_alignment": round(change_1d - sector_return, 2), "market_direction": market_direction, "price": history["close"], "change_percent": round(change_1d, 2), "trend": trend_score, "strength": round(max(0, min(100, 50 + relative_strength * 3))), "momentum": momentum_score, "volume": round(volume_ratio, 2), "velocity": round(velocity, 2), "relative_strength": round(relative_strength, 2), "liquidity": liquidity, "volatility": round(volatility, 2), "support": round(support, 2), "resistance": round(resistance, 2), "price_action": action, "ema_20": round(ema(closes, 20), 2), "ema_50": round(ema(closes, 50), 2), "ema_200": round(ema(closes, 200), 2), "rsi": round(rsi(closes), 2), "macd": round(macd, 2) if macd is not None else None, "vwap": round(vwap, 2) if vwap is not None else None, "atr": round(atr_value, 2) if atr_value is not None else None, "score": score, "timestamp": history["timestamp"], "source": history["source"], "freshness": "live"}
     except Exception:
         return None
 

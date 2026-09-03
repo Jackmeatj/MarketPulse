@@ -16,6 +16,44 @@ Indian stock market analysis and derivatives platform.
 
 The application is designed to run locally using Docker Compose.
 
+## Production and Cloudflare
+
+The production stack serves the built React app and reverse-proxies `/api/` to
+FastAPI inside the Docker network. Only the frontend is published to the host:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.production.yml up --build -d
+```
+
+Point Cloudflare Tunnel at `http://localhost:80` (or set
+`PRODUCTION_FRONTEND_PORT` if port 80 is already in use). Do not expose port
+8000 separately; the browser should use the public domain for both the app and
+its `/api/` requests.
+
+### Data-source architecture
+
+The MarketPulse core design is provider-neutral and intentionally avoids broker-token
+lock-in. The authoritative data path is:
+
+```text
+NSE/BSE official filings and market data
+        ↓
+Normalization layer
+        ↓
+PostgreSQL canonical dataset
+        ↓
+MarketPulse technical + fundamental + event engines
+```
+
+This means the product owns the historical dataset and calculates growth, valuation,
+risk, ATR, sector-relative metrics, and signal scores internally. Secondary sources
+like Stoxim can be used as optional structured enrichment, but they are not the
+primary source of truth.
+
+The current implementation remains intentionally provisional until the official
+NSE/BSE raw data ingestion layer is connected. Fundamental, valuation and catalyst
+engines stay marked as `PENDING` rather than being fabricated.
+
 ## Indian sector data sources
 
 For sector breadth and performance, the preferred source is NSE India's official

@@ -7,6 +7,9 @@ from typing import Any, Callable
 
 from .derivatives import build_recommendation, collect_option_chain
 from .market_data import collect_overview, session_state
+from .nse_ingestion import sync_nse_market_data
+from .nse_ingestion import canonical_symbols, sync_nse_corporate_events, sync_nse_financial_results
+from .nse_metrics import recalculate_engine_metrics
 from .sectors import collect_sectors
 from .storage import init_storage, persist_cycle, redis_client
 
@@ -52,10 +55,19 @@ def run_cycle(cycle_number: int) -> None:
     try:
         overview = with_retries(collect_overview)
         sectors = with_retries(collect_sectors)
+        nse_status = with_retries(sync_nse_market_data, attempts=1)
+        symbols = canonical_symbols()
+        fiscal_status = {"status": "ok", "imported": sync_nse_financial_results(symbols), "symbols": len(symbols)}
+        event_status = {"status": "ok", "imported": sync_nse_corporate_events(symbols), "symbols": len(symbols)}
+        metric_status = recalculate_engine_metrics()
         options = collect_option_chain() if cycle_number % OPTIONS_EVERY_CYCLES == 0 else {}
-        recommendation = build_recommendation(overview, options or {"signal": "UNAVAILABLE"})
+        recommendation = build_recommendation(overview, sectors, options or {"signal": "UNAVAILABLE"})
         persist_cycle(overview, sectors, options, recommendation, persist_options=bool(options))
         client.setex("marketpulse:latest:sectors", 600, json.dumps(sectors))
+        client.setex("marketpulse:latest:nse_sync", 600, json.dumps(nse_status))
+        client.setex("marketpulse:latest:financials", 600, json.dumps(fiscal_status))
+        client.setex("marketpulse:latest:events", 600, json.dumps(event_status))
+        client.setex("marketpulse:latest:metrics", 600, json.dumps(metric_status))
         if options:
             client.setex("marketpulse:latest:options:NIFTY", 600, json.dumps(options))
         client.setex("marketpulse:latest:recommendation:NIFTY", 600, json.dumps(recommendation))
@@ -63,7 +75,14 @@ def run_cycle(cycle_number: int) -> None:
         client.setex(
             f"marketpulse:collector:run:{cycle_number}",
             600,
-            json.dumps({"as_of": overview["as_of"], "options_collected": bool(options), "status": "success"}),
+            json.dumps({
+                "as_of": overview["as_of"],
+                "options_collected": bool(options),
+                "status": "success",
+                "nse_sync": nse_status,
+                "financials": fiscal_status,
+                "metrics": metric_status,
+            }),
         )
     finally:
         current = client.get(LOCK_KEY)

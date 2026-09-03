@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from .storage import cached_json, init_storage, latest_overview, read_history, storage_health
 from .derivatives import empty_derivatives
-from .sectors import CORE_SECTORS, unavailable_sector
+from .fundamentals import collect_fundamentals
+from .sectors import CORE_SECTORS, collect_sectors, unavailable_sector
 from .stocks import collect_sector_stocks
 
 app = FastAPI(
@@ -247,3 +248,75 @@ def sector_stocks(sector: str):
     if not result.get("items") and sector not in CORE_SECTORS:
         raise HTTPException(status_code=404, detail="Unknown sector")
     return result
+
+
+@app.get("/api/stocks/{symbol}/analysis")
+def stock_analysis(symbol: str, sector: str):
+    sector_data = cached_json("marketpulse:latest:sectors") or {}
+    overview = latest_overview() or {}
+    sector_item = next((item for item in sector_data.get("items", []) if item.get("sector", "").lower() == sector.lower()), None)
+    if sector_item is None:
+        sector_data = collect_sectors()
+        sector_item = next((item for item in sector_data.get("items", []) if item.get("sector", "").lower() == sector.lower()), None)
+    stocks = collect_sector_stocks(
+        sector,
+        (sector_item or {}).get("change_percent") or 0,
+        (sector_data.get("benchmark") or {}).get("change_percent") or 0,
+        overview.get("overall_signal", "NEUTRAL"),
+    )
+    stock = next((item for item in stocks.get("items", []) if item["symbol"].lower() == symbol.lower()), None)
+    if not stock:
+        raise HTTPException(status_code=404, detail="Stock is not available in this sector snapshot")
+    fundamentals = collect_fundamentals(stock["symbol"])
+    market_score = overview.get("score")
+    sector_score = (sector_item or {}).get("score")
+    technical_score = stock["score"]
+    relative_score = max(0, min(100, round(50 + stock["relative_strength"] * 3)))
+    trading_score = round(technical_score * 0.55 + relative_score * 0.25 + stock["liquidity"] * 0.2)
+    investment_score = round((sector_score if sector_score is not None else 50) * 0.5 + relative_score * 0.2 + (market_score if market_score is not None else 50) * 0.3)
+    overall_score = round(investment_score * 0.45 + trading_score * 0.55)
+    fundamental_scores = fundamentals.get("scores", {})
+    investment_components = [score for score in (fundamental_scores.get("fundamentals"), fundamental_scores.get("growth"), fundamental_scores.get("valuation"), sector_score, relative_score) if score is not None]
+    investment_score = round(sum(investment_components) / len(investment_components)) if investment_components else investment_score
+    overall_score = round(investment_score * 0.45 + trading_score * 0.55)
+    classification = "HIGH_CONVICTION_WATCH" if overall_score >= 75 else "CONSTRUCTIVE" if overall_score >= 60 else "MONITOR" if overall_score >= 45 else "INSUFFICIENT_EVIDENCE"
+    return {
+        "symbol": stock["symbol"],
+        "sector": sector,
+        "as_of": stock["timestamp"],
+        "price": stock["price"],
+        "change_percent": stock["change_percent"],
+        "overall_score": overall_score,
+        "investment_score": investment_score,
+        "trading_score": trading_score,
+        "classification": classification,
+        "decision": "WATCH FOR CONFIRMATION" if classification in ("HIGH_CONVICTION_WATCH", "CONSTRUCTIVE") else "MONITOR",
+        "scores": {
+            "fundamentals": fundamental_scores.get("fundamentals"),
+            "growth": fundamental_scores.get("growth"),
+            "sector": sector_score,
+            "technical": technical_score,
+            "relative_strength": relative_score,
+            "volume": stock["liquidity"],
+            "catalyst": fundamentals.get("catalyst_score"),
+            "valuation": fundamental_scores.get("valuation"),
+            "risk": fundamentals.get("metrics", {}).get("debt_to_equity"),
+        },
+        "technical": {
+            "trend": stock["trend"], "momentum": stock["momentum"], "volatility": stock["volatility"],
+            "volume_ratio": stock["volume"], "velocity": stock["velocity"], "price_action": stock["price_action"],
+            "support": stock["support"], "resistance": stock["resistance"], "ema_20": stock["ema_20"],
+            "ema_50": stock["ema_50"], "ema_200": stock["ema_200"], "rsi": stock["rsi"], "macd": stock["macd"],
+            "vwap": stock["vwap"], "atr": stock["atr"],
+        },
+        "fundamentals": fundamentals.get("metrics", {}),
+        "thesis": [
+            f"{sector} sector score is {sector_score if sector_score is not None else 'pending'}.",
+            f"Price structure is {stock['price_action'].lower()} with relative strength of {stock['relative_strength']:+.2f}%.",
+        ],
+        "catalysts": fundamentals.get("catalyst_reasons", []),
+        "risks": fundamentals.get("limitations", []) + ["Use the support level as invalidation; this is not a guaranteed return forecast."],
+        "data_quality": {"status": "PROVISIONAL" if fundamentals.get("status") != "live" else "PARTIAL", "available_engines": 5 + len(fundamental_scores) + (1 if fundamentals.get("catalyst_score") is not None else 0), "pending_engines": max(0, 4 - len(fundamental_scores) - (1 if fundamentals.get("catalyst_score") is not None else 0)), "missing_inputs": ["fundamentals", "growth", "catalysts", "valuation"] if fundamentals.get("status") != "live" else ([] if fundamentals.get("catalyst_score") is not None else ["catalysts"])},
+        "sources": [stock["source"], (sector_item or {}).get("source", "Unavailable"), fundamentals.get("source", "Unavailable")],
+        "disclaimer": "Research output only. Not investment advice. Validate sources, liquidity, execution, and risk before trading.",
+    }

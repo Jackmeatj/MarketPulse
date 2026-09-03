@@ -35,11 +35,35 @@ type Derivatives = {
 }
 
 type Recommendation = {
+  symbol?: string
   bias: string
+  classification?: string
+  overall_score?: number | null
+  investment_score?: number | null
+  trading_score?: number | null
   market_score: number
   derivatives_signal: string
+  leading_sector?: string | null
+  scores?: Record<string, number | null>
+  thesis?: string[]
+  catalysts?: string[]
+  risks?: string[]
+  data_quality?: { status: string; available_engines: number; pending_engines: number; missing_inputs: string[] }
   setups: { instrument: string; direction: string; trigger: string; risk: string; reason: string }[]
   disclaimer: string
+}
+
+const recommendationScoreLabels: Record<string, string> = {
+  fundamentals: "Fundamentals",
+  growth: "Growth acceleration",
+  sector: "Sector strength",
+  technical: "Technical structure",
+  relative_strength: "Relative strength",
+  volume: "Volume & velocity",
+  catalyst: "Catalysts",
+  valuation: "Valuation",
+  risk: "Risk control",
+  derivatives: "Derivatives",
 }
 
 type SectorItem = {
@@ -105,6 +129,28 @@ type SectorStocks = {
   error?: string
 }
 
+type StockAnalysis = {
+  symbol: string
+  sector: string
+  as_of: string
+  price: number
+  change_percent: number
+  overall_score: number
+  investment_score: number
+  trading_score: number
+  classification: string
+  decision: string
+  scores: Record<string, number | null>
+  technical: Record<string, number | string>
+  fundamentals: Record<string, number | null>
+  thesis: string[]
+  catalysts: string[]
+  risks: string[]
+  data_quality: { status: string; available_engines: number; pending_engines: number; missing_inputs: string[] }
+  sources: string[]
+  disclaimer: string
+}
+
 type Macro = {
   dollar_index: Snapshot
   fed_funds_rate: { value: number | null; next_revision_date: string | null; source: string; freshness: Freshness }
@@ -158,7 +204,7 @@ type Overview = {
   }[]
 }
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000"
+const API_URL = import.meta.env.VITE_API_URL || ""
 
 function formatNumber(value: number, decimals = 2) {
   return value.toLocaleString("en-IN", {
@@ -211,6 +257,39 @@ function MarketCard({
   )
 }
 
+function StockAnalysisPage({ symbol, sector, onBack }: { symbol: string; sector: string; onBack: () => void }) {
+  const [analysis, setAnalysis] = useState<StockAnalysis | null>(null)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    fetch(`${API_URL}/api/stocks/${encodeURIComponent(symbol)}/analysis?sector=${encodeURIComponent(sector)}`)
+      .then((response) => { if (!response.ok) throw new Error(`API returned ${response.status}`); return response.json() as Promise<StockAnalysis> })
+      .then(setAnalysis)
+      .catch((err: Error) => setError(err.message))
+  }, [sector, symbol])
+
+  return <div className="app">
+    <header className="topbar"><div className="brand"><div className="brand-mark">M</div><div><div className="brand-name">MarketPulse</div><div className="brand-subtitle">STOCK INTELLIGENCE</div></div></div><button className="menu-button" type="button" onClick={onBack}>Back to {sector}</button></header>
+    <main className="dashboard stock-analysis-page">
+      <div className="detail-crumb"><button type="button" onClick={onBack}>Indian sectors</button><span>/</span><button type="button" onClick={onBack}>{sector}</button><span>/</span><strong>{symbol}</strong></div>
+      {!analysis && !error && <div className="empty-state">Calculating stock intelligence...</div>}
+      {error && <div className="error-box"><strong>Stock analysis unavailable</strong><span>{error}</span></div>}
+      {analysis && <>
+        <section className={`decision-banner ${analysis.decision.includes("WATCH") ? "positive" : "neutral"}`}>
+          <div><span className="section-kicker">MARKETPULSE RECOMMENDATION ENGINE</span><h1>{analysis.symbol}</h1><p>{analysis.sector} · ₹{formatNumber(analysis.price)} · {pct(analysis.change_percent)}</p></div>
+          <div className="decision-score"><strong>{analysis.overall_score}</strong><span>/ 100</span><b>{analysis.decision}</b><small>{analysis.classification.replaceAll("_", " ")}</small></div>
+        </section>
+        <div className="analysis-score-strip"><div><span>Investment score</span><strong>{analysis.investment_score}</strong><small>Company quality & opportunity</small></div><div><span>Trading score</span><strong>{analysis.trading_score}</strong><small>Price, momentum & participation</small></div><div><span>Data status</span><strong>{analysis.data_quality.status}</strong><small>{analysis.data_quality.available_engines} engines available · {analysis.data_quality.pending_engines} pending</small></div></div>
+        <section className="analysis-section"><div className="section-heading"><div><span className="section-kicker">01 / ENGINE BREAKDOWN</span><h2>Evidence behind the decision</h2></div></div><div className="analysis-factor-grid">{Object.entries(recommendationScoreLabels).filter(([key]) => key !== "derivatives").map(([key, label]) => <div className="analysis-factor" key={key}><span>{label}</span><strong>{analysis.scores[key] ?? "PENDING"}</strong>{analysis.scores[key] !== null && <i><em style={{ width: `${analysis.scores[key]}%` }} /></i>}</div>)}</div></section>
+        <section className="analysis-columns"><article className="analysis-section"><span className="section-kicker">02 / THESIS</span><h2>Why it qualifies</h2>{analysis.thesis.map((item) => <p className="analysis-copy" key={item}>{item}</p>)}</article><article className="analysis-section"><span className="section-kicker">03 / RISK GATE</span><h2>What can invalidate it</h2>{analysis.risks.map((item) => <p className="analysis-copy risk-copy" key={item}>{item}</p>)}</article></section>
+        <section className="analysis-section"><span className="section-kicker">04 / PRICE STRUCTURE</span><h2>Technical parameters</h2><div className="technical-grid">{Object.entries(analysis.technical).map(([key, value]) => <div key={key}><span>{key.replaceAll("_", " ")}</span><strong>{typeof value === "number" ? value.toLocaleString("en-IN") : value}</strong></div>)}</div></section>
+        <section className="analysis-section"><span className="section-kicker">05 / FUNDAMENTAL ENGINE</span><h2>Financial quality & valuation</h2><div className="technical-grid">{Object.entries(analysis.fundamentals).map(([key, value]) => <div key={key}><span>{key.replaceAll("_", " ")}</span><strong>{value === null ? "PENDING" : value.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</strong></div>)}</div></section>
+        <small className="sector-limitations">Sources: {analysis.sources.join(" · ")}. {analysis.disclaimer}</small>
+      </>}
+    </main>
+  </div>
+}
+
 function SectorStocksPage({ sector, onBack }: { sector: string; onBack: () => void }) {
   const [data, setData] = useState<SectorStocks | null>(null)
   const [error, setError] = useState("")
@@ -221,6 +300,11 @@ function SectorStocksPage({ sector, onBack }: { sector: string; onBack: () => vo
       .then(setData)
       .catch((err: Error) => setError(err.message))
   }, [sector])
+
+  const openStock = (symbol: string) => {
+    window.history.pushState({}, "", `/stocks/${encodeURIComponent(symbol)}/analysis?sector=${encodeURIComponent(sector)}`)
+    window.dispatchEvent(new PopStateEvent("popstate"))
+  }
 
   return (
     <div className="app">
@@ -235,13 +319,29 @@ function SectorStocksPage({ sector, onBack }: { sector: string; onBack: () => vo
         {!data && !error && <div className="empty-state">Loading sector constituents...</div>}
         {data && data.items.length > 0 && <section className="stock-table-wrap">
           <div className="stock-table stock-table-head"><span># / Stock</span><span>Score</span><span>Price</span><span>Trend</span><span>Momentum</span><span>RS</span><span>Volume</span><span>Liquidity</span><span>Action</span></div>
-          {data.items.map((stock, index) => <div className="stock-table stock-row" key={stock.symbol}><span><strong>{String(index + 1).padStart(2, "0")} · {stock.symbol}</strong><small>{stock.freshness.toUpperCase()} · {new Date(stock.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</small></span><strong className="sector-score">{stock.score}</strong><span>{formatNumber(stock.price)}</span><span>{stock.trend}</span><span>{stock.momentum}</span><span className={stock.relative_strength >= 0 ? "positive-text" : "negative-text"}>{pct(stock.relative_strength)}</span><span>{stock.volume}x</span><span>{stock.liquidity}</span><span className="price-action"><strong>{stock.price_action}</strong><small>S {formatNumber(stock.support)} · R {formatNumber(stock.resistance)}</small></span></div>)}
+          {data.items.map((stock, index) => <div className="stock-table stock-row" key={stock.symbol}><span><button className="stock-link" type="button" onClick={() => openStock(stock.symbol)}><strong>{String(index + 1).padStart(2, "0")} · {stock.symbol}</strong></button><small>{stock.freshness.toUpperCase()} · {new Date(stock.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</small></span><strong className="sector-score">{stock.score}</strong><span>{formatNumber(stock.price)}</span><span>{stock.trend}</span><span>{stock.momentum}</span><span className={stock.relative_strength >= 0 ? "positive-text" : "negative-text"}>{pct(stock.relative_strength)}</span><span>{stock.volume}x</span><span>{stock.liquidity}</span><span className="price-action"><strong>{stock.price_action}</strong><small>S {formatNumber(stock.support)} · R {formatNumber(stock.resistance)}</small></span></div>)}
         </section>}
         {data && <small className="sector-limitations">{data.source}. {data.limitations.join(" ")}</small>}
       </main>
     </div>
   )
 }
+
+type AppAppearance = "glass" | "basic" | "aurora" | "sunset"
+type FontPreset = "balanced" | "compact" | "wide"
+
+const appearanceOptions: { value: AppAppearance; label: string }[] = [
+  { value: "glass", label: "Glass" },
+  { value: "basic", label: "Slate" },
+  { value: "aurora", label: "Aurora" },
+  { value: "sunset", label: "Sunset" },
+]
+
+const fontOptions: { value: FontPreset; label: string }[] = [
+  { value: "balanced", label: "Balanced" },
+  { value: "compact", label: "Compact" },
+  { value: "wide", label: "Wide" },
+]
 
 function App() {
   const [data, setData] = useState<Overview | null>(null)
@@ -251,12 +351,28 @@ function App() {
   const [derivatives, setDerivatives] = useState<Derivatives | null>(null)
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null)
   const [sectors, setSectors] = useState<SectorData | null>(null)
-  const [appearance, setAppearance] = useState<"glass" | "basic">("glass")
+  const [appearance, setAppearance] = useState<AppAppearance>("glass")
+  const [fontPreset, setFontPreset] = useState<FontPreset>("balanced")
   const [menuOpen, setMenuOpen] = useState(false)
   const [selectedSector, setSelectedSector] = useState<string | null>(() => {
     const match = window.location.pathname.match(/^\/sectors\/([^/]+)\/stocks$/)
     return match ? decodeURIComponent(match[1]) : null
   })
+  const [selectedStock, setSelectedStock] = useState<{ symbol: string; sector: string } | null>(() => {
+    const match = window.location.pathname.match(/^\/stocks\/([^/]+)\/analysis$/)
+    const sector = new URLSearchParams(window.location.search).get("sector")
+    return match && sector ? { symbol: decodeURIComponent(match[1]), sector } : null
+  })
+
+  useEffect(() => {
+    const syncRoute = () => {
+      const stockMatch = window.location.pathname.match(/^\/stocks\/([^/]+)\/analysis$/)
+      const sector = new URLSearchParams(window.location.search).get("sector")
+      setSelectedStock(stockMatch && sector ? { symbol: decodeURIComponent(stockMatch[1]), sector } : null)
+    }
+    window.addEventListener("popstate", syncRoute)
+    return () => window.removeEventListener("popstate", syncRoute)
+  }, [])
 
   const openSector = (sector: string) => {
     window.history.pushState({}, "", `/sectors/${encodeURIComponent(sector)}/stocks`)
@@ -326,6 +442,7 @@ function App() {
     )
   }
 
+  if (selectedStock) return <StockAnalysisPage symbol={selectedStock.symbol} sector={selectedStock.sector} onBack={() => { window.history.pushState({}, "", `/sectors/${encodeURIComponent(selectedStock.sector)}/stocks`); setSelectedStock(null); setSelectedSector(selectedStock.sector) }} />
   if (selectedSector) return <SectorStocksPage sector={selectedSector} onBack={() => { window.history.pushState({}, "", "/"); setSelectedSector(null) }} />
 
   const bullish = data.overall_signal === "BULLISH"
@@ -347,7 +464,7 @@ function App() {
   })
 
   return (
-    <div className={`app ${appearance}`}>
+    <div className={`app ${appearance} ${fontPreset}`}>
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">M</div>
@@ -370,7 +487,32 @@ function App() {
           </div>
           <div className="appearance-menu">
             <button className="menu-button" type="button" onClick={() => setMenuOpen(!menuOpen)} aria-expanded={menuOpen}>View</button>
-            {menuOpen && <div className="menu-popover"><span>Appearance</span><button type="button" className={appearance === "glass" ? "selected" : ""} onClick={() => { setAppearance("glass"); setMenuOpen(false) }}>Glass</button><button type="button" className={appearance === "basic" ? "selected" : ""} onClick={() => { setAppearance("basic"); setMenuOpen(false) }}>Basic</button></div>}
+            {menuOpen && (
+              <div className="menu-popover">
+                <span>Skin</span>
+                {appearanceOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={appearance === option.value ? "selected" : ""}
+                    onClick={() => { setAppearance(option.value); setMenuOpen(false) }}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+                <span>Font</span>
+                {fontOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={fontPreset === option.value ? "selected" : ""}
+                    onClick={() => { setFontPreset(option.value); setMenuOpen(false) }}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -614,7 +756,7 @@ function App() {
         <div className="section-heading">
           <div>
             <span className="section-kicker">06 / DERIVATIVES</span>
-            <h2>Options positioning & setups</h2>
+            <h2>Options positioning & conviction</h2>
           </div>
           {derivatives && <span className={`data-status ${derivatives.freshness === "live" ? "live" : "stale"}`}><span className="status-dot" /> {derivatives.freshness.toUpperCase()}</span>}
         </div>
@@ -636,11 +778,37 @@ function App() {
             ) : <div className="empty-state">Options chain unavailable: {derivatives?.error || "No source response"}</div>}
           </article>
           <article className="recommendation-card">
-            <div className="metric-title">RECOMMENDATION ENGINE</div>
-            <strong className={`recommendation-bias ${recommendation?.bias.toLowerCase()}`}>{recommendation?.bias || "UNAVAILABLE"}</strong>
-            <span className="recommendation-score">Market score {recommendation?.market_score ?? "-"} · Options {recommendation?.derivatives_signal ?? "-"}</span>
-            {recommendation?.setups.map((setup) => <div className="setup-row" key={setup.direction}><strong>{setup.direction}</strong><span>{setup.trigger} · Risk {setup.risk}</span></div>)}
-            <small>{recommendation?.disclaimer}</small>
+            <div className="recommendation-heading">
+              <div>
+                <div className="metric-title">MARKETPULSE CONVICTION DESK</div>
+                <div className="recommendation-instrument">{recommendation?.symbol || "NIFTY"} · {recommendation?.leading_sector || "Market view"}</div>
+              </div>
+              <span className="data-status stale">{recommendation?.data_quality?.status || "PROVISIONAL"}</span>
+            </div>
+            <div className="recommendation-summary">
+              <div>
+                <span className="recommendation-label">Overall conviction</span>
+                <strong className={`recommendation-bias ${recommendation?.bias.toLowerCase()}`}>{recommendation?.overall_score ?? "-"}<small>/100</small></strong>
+                <span className="recommendation-classification">{(recommendation?.classification || recommendation?.bias || "UNAVAILABLE").replaceAll("_", " ")}</span>
+              </div>
+              <div className="recommendation-scores">
+                <div><span>Investment</span><strong>{recommendation?.investment_score ?? "-"}</strong></div>
+                <div><span>Trading</span><strong>{recommendation?.trading_score ?? "-"}</strong></div>
+                <div><span>Options</span><strong>{recommendation?.derivatives_signal ?? "-"}</strong></div>
+              </div>
+            </div>
+            <div className="recommendation-factors">
+              {Object.entries(recommendationScoreLabels).map(([key, label]) => {
+                const score = recommendation?.scores?.[key]
+                return <div className="factor-meter" key={key}><div><span>{label}</span><strong>{score ?? "Pending"}</strong></div><i><em style={{ width: `${score ?? 0}%` }} /></i></div>
+              })}
+            </div>
+            <div className="recommendation-columns">
+              <div><span className="recommendation-label">Why it qualifies</span>{(recommendation?.thesis || ["Awaiting the next collector cycle."]).map((item) => <p key={item}>{item}</p>)}</div>
+              <div><span className="recommendation-label">Risk flags</span>{(recommendation?.risks || ["Risk assessment pending."]).map((item) => <p key={item}>{item}</p>)}</div>
+            </div>
+            {recommendation?.setups.map((setup) => <div className="setup-row" key={setup.direction}><strong>{setup.direction}</strong><span>{setup.trigger} · Risk {setup.risk}</span><small>{setup.reason}</small></div>)}
+            <small className="recommendation-disclaimer">{recommendation?.disclaimer}</small>
           </article>
         </section>
 

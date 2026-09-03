@@ -167,6 +167,71 @@ def init_storage() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS instruments (
+                symbol TEXT PRIMARY KEY,
+                exchange TEXT NOT NULL DEFAULT 'NSE',
+                company_name TEXT,
+                isin TEXT,
+                sector TEXT,
+                industry TEXT,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                source TEXT NOT NULL DEFAULT 'nse',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nse_daily_prices (
+                symbol TEXT NOT NULL,
+                trade_date DATE NOT NULL,
+                open_price DOUBLE PRECISION,
+                high_price DOUBLE PRECISION,
+                low_price DOUBLE PRECISION,
+                close_price DOUBLE PRECISION,
+                volume BIGINT,
+                source TEXT NOT NULL DEFAULT 'NSE India historical daily feed',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (symbol, trade_date, source)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS financial_statements (
+                id BIGSERIAL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                statement_type TEXT NOT NULL,
+                period_end DATE NOT NULL,
+                period_kind TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value DOUBLE PRECISION,
+                currency TEXT NOT NULL DEFAULT 'INR',
+                source TEXT NOT NULL,
+                source_ref TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (symbol, statement_type, period_end, period_kind, metric_name, source)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS corporate_events (
+                id BIGSERIAL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                event_date DATE NOT NULL,
+                event_type TEXT NOT NULL,
+                title TEXT,
+                description TEXT,
+                source TEXT NOT NULL,
+                source_ref TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (symbol, event_date, event_type, source_ref)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE INDEX IF NOT EXISTS market_history_observed_at_idx
             ON market_history (observed_at DESC)
             """
