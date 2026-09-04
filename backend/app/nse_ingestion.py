@@ -118,28 +118,37 @@ def seed_instrument_master(symbols: Iterable[str] | None = None) -> int:
 
 def _fetch_daily_history_from_nse(symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
     try:
-        from jugaad_data.nse import stock_df
+        from jugaad_data.nse import stock_raw
     except Exception:
         return []
 
     try:
-        frame = stock_df(symbol=symbol, from_date=start_date, to_date=end_date, series="EQ")
+        # We deliberately use stock_raw() instead of stock_df(): stock_df()
+        # internally does pd.DataFrame(raw)[stock_select_headers], which
+        # raises a KeyError and drops the whole request whenever NSE's
+        # response for a given symbol is missing even one expected column
+        # (e.g. delivery-quantity fields are absent for some symbols/series).
+        # stock_raw() gives us the plain list of dicts before that fragile
+        # column selection, so we can read fields defensively ourselves.
+        raw_rows = stock_raw(symbol, start_date, end_date, "EQ")
     except Exception:
         return []
 
-    if frame is None or getattr(frame, "empty", True):
+    if not raw_rows:
         return []
 
     rows: list[dict[str, Any]] = []
-    for _, row in frame.iterrows():
-        date_value = _parse_date(_row_value(row.to_dict(), "DATE", "Date", "date"))
+    for raw_row in raw_rows:
+        date_value = _parse_date(_row_value(raw_row, "CH_TIMESTAMP", "DATE", "Date", "date"))
         if date_value is None:
             continue
-        open_price = _numeric(_row_value(row.to_dict(), "OPEN", "Open", "open"))
-        high_price = _numeric(_row_value(row.to_dict(), "HIGH", "High", "high"))
-        low_price = _numeric(_row_value(row.to_dict(), "LOW", "Low", "low"))
-        close_price = _numeric(_row_value(row.to_dict(), "CLOSE", "Close", "close"))
-        volume_value = _numeric(_row_value(row.to_dict(), "VOLUME", "Volume", "volume", "TOTAL_TRADES"))
+        open_price = _numeric(_row_value(raw_row, "CH_OPENING_PRICE", "OPEN", "Open", "open"))
+        high_price = _numeric(_row_value(raw_row, "CH_TRADE_HIGH_PRICE", "HIGH", "High", "high"))
+        low_price = _numeric(_row_value(raw_row, "CH_TRADE_LOW_PRICE", "LOW", "Low", "low"))
+        close_price = _numeric(_row_value(raw_row, "CH_CLOSING_PRICE", "CLOSE", "Close", "close"))
+        volume_value = _numeric(
+            _row_value(raw_row, "CH_TOT_TRADED_QTY", "VOLUME", "Volume", "volume", "TOTAL_TRADES")
+        )
         rows.append(
             {
                 "symbol": _normalize_symbol(symbol),
@@ -195,10 +204,14 @@ def store_nse_daily_history(rows: list[dict[str, Any]]) -> int:
     return inserted
 
 
-def sync_nse_market_data(force: bool = False) -> dict[str, Any]:
+def sync_nse_market_data(force: bool = False, symbols: list[str] | None = None) -> dict[str, Any]:
     cache_key = "marketpulse:nse:last_sync"
     now = datetime.now(timezone.utc)
-    if not force:
+    # The 6-hour "skip if recently synced" gate only makes sense for the
+    # full, unscoped sync. A caller passing explicit symbols is asking for
+    # those symbols specifically (e.g. a targeted backfill/debug call), so
+    # we always honor that regardless of when the last full sync ran.
+    if not force and not symbols:
         try:
             cached = redis_client().get(cache_key)
             if cached:
@@ -208,24 +221,26 @@ def sync_nse_market_data(force: bool = False) -> dict[str, Any]:
         except Exception:
             pass
 
-    symbols = _canonical_symbols()
-    seed_instrument_master(symbols)
+    target_symbols = symbols or _canonical_symbols()
+    seed_instrument_master(target_symbols)
 
     end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=DEFAULT_LOOKBACK_DAYS)
     inserted = 0
-    for symbol in symbols:
+    for symbol in target_symbols:
         rows = _fetch_daily_history_from_nse(symbol, start_date, end_date)
         inserted += store_nse_daily_history(rows)
 
-    try:
-        redis_client().setex(cache_key, 60 * 60 * 6, now.isoformat())
-    except Exception:
-        pass
+    if not symbols:
+        # Only update the "last full sync" marker for unscoped, full syncs.
+        try:
+            redis_client().setex(cache_key, 60 * 60 * 6, now.isoformat())
+        except Exception:
+            pass
 
     return {
         "status": "ok",
-        "symbols": len(symbols),
+        "symbols": len(target_symbols),
         "inserted_rows": inserted,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
@@ -244,7 +259,7 @@ def sync_nse_corporate_events(symbols: list[str] | None = None) -> int:
     return imported
 
 
-def sync_nse_financial_results(symbols: list[str] | None = None) -> int:
+def sync_nse_financial_results(symbols: list[str] | None = None) -> dict[str, Any]:
     from .nse_financial_ingest import ingest_financial_results
 
-    return ingest_financial_results(symbols or _canonical_symbols())["imported"]
+    return ingest_financial_results(symbols or _canonical_symbols())

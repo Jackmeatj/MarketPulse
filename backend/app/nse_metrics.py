@@ -65,6 +65,8 @@ def _growth_scores(symbol: str) -> dict[str, float | None]:
     rows = _latest_statement_rows(symbol, "profit_loss")
     by_metric: dict[str, list[float]] = {}
     for row in rows:
+        if row["period_kind"] != "annual":
+            continue
         value = _safe_float(row["metric_value"])
         if value is None:
             continue
@@ -79,6 +81,23 @@ def _growth_scores(symbol: str) -> dict[str, float | None]:
         "profit_cagr_3y": _cagr(profit[:4], 3) if len(profit) >= 4 else None,
         "eps_cagr_3y": _cagr(eps[:4], 3) if len(eps) >= 4 else None,
     }
+
+
+def _total_equity(metrics: dict[str, list[float]]) -> float | None:
+    """Equity can show up under a few different tag combinations depending on
+    the filer. Prefer an explicit net worth / equity figure; fall back to
+    summing the two-part equity_share_capital + other_equity tags."""
+    net_worth = _safe_float(metrics.get("net_worth", [None])[-1])
+    if net_worth is not None:
+        return net_worth
+    equity = _safe_float(metrics.get("equity", [None])[-1])
+    if equity is not None:
+        return equity
+    share_capital = _safe_float(metrics.get("equity_share_capital", [None])[-1])
+    other_equity = _safe_float(metrics.get("other_equity", [None])[-1])
+    if share_capital is not None or other_equity is not None:
+        return (share_capital or 0.0) + (other_equity or 0.0)
+    return None
 
 
 def _valuation_scores(symbol: str) -> dict[str, float | None]:
@@ -109,16 +128,30 @@ def _valuation_scores(symbol: str) -> dict[str, float | None]:
         _safe_float(metrics.get("total_debt", [0])[-1]),
     ] if v is not None)
     cash = _safe_float(metrics.get("cash_and_equivalents", [0])[-1]) or 0.0
-    ebitda = _safe_float(_latest_statement_rows(symbol, "profit_loss", "ebitda")[0]["metric_value"]) if _latest_statement_rows(symbol, "profit_loss", "ebitda") else None
-    eps = _safe_float(_latest_statement_rows(symbol, "profit_loss", "eps")[0]["metric_value"]) if _latest_statement_rows(symbol, "profit_loss", "eps") else None
+
+    pl_rows = _latest_statement_rows(symbol, "profit_loss")
+    pl_metrics: dict[str, float] = {}
+    for row in pl_rows:
+        value = _safe_float(row["metric_value"])
+        if value is not None and row["metric_name"] not in pl_metrics:
+            pl_metrics[row["metric_name"]] = value  # rows are already latest-first
+
+    ebitda = pl_metrics.get("ebitda")
+    if ebitda is None and pl_metrics.get("pbt") is not None:
+        # Non-BFSI companies don't tag EBITDA directly — derive it:
+        # EBITDA = PBT + Finance Costs + Depreciation & Amortisation
+        ebitda = pl_metrics["pbt"] + pl_metrics.get("finance_costs", 0.0) + pl_metrics.get("depreciation", 0.0)
+    eps = pl_metrics.get("eps")
 
     pe = (close / eps) if close and eps else None
-    pb = None
+    total_equity = _total_equity(metrics)
+    shares_outstanding = (paid_up_capital / face_value) if face_value else None
+    book_value_per_share = (total_equity / shares_outstanding) if total_equity and shares_outstanding else None
+    pb = (close / book_value_per_share) if book_value_per_share else None
     ev_ebitda = None
-    if ebitda and ebitda != 0:
-        if latest_market_cap is not None:
-            ev_value = latest_market_cap + debt - cash
-            ev_ebitda = ev_value / ebitda
+    if ebitda and ebitda != 0 and latest_market_cap is not None:
+        ev_value = latest_market_cap + debt - cash
+        ev_ebitda = ev_value / ebitda
     return {"pe": pe, "pb": pb, "ev_ebitda": ev_ebitda}
 
 
@@ -219,8 +252,11 @@ def calculate_symbol_metrics(symbol: str) -> dict[str, Any]:
     }
 
 
-def recalculate_engine_metrics() -> dict[str, Any]:
-    with postgres_connection() as connection:
-        symbols = [row[0] for row in connection.execute("SELECT DISTINCT symbol FROM nse_daily_prices ORDER BY symbol").fetchall()]
-    results = {symbol: calculate_symbol_metrics(symbol) for symbol in symbols}
-    return {"status": "ok", "symbols": len(symbols), "results": results}
+def recalculate_engine_metrics(symbols: list[str] | None = None) -> dict[str, Any]:
+    if symbols:
+        target_symbols = [s.upper() for s in symbols]
+    else:
+        with postgres_connection() as connection:
+            target_symbols = [row[0] for row in connection.execute("SELECT DISTINCT symbol FROM nse_daily_prices ORDER BY symbol").fetchall()]
+    results = {symbol: calculate_symbol_metrics(symbol) for symbol in target_symbols}
+    return {"status": "ok", "symbols": len(target_symbols), "results": results}

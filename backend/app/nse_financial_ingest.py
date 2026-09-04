@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
 from datetime import date, datetime
 from typing import Any
@@ -11,6 +12,8 @@ import xml.etree.ElementTree as ET
 import httpx
 
 from .storage import postgres_connection
+
+logger = logging.getLogger("marketpulse.nse_financial_ingest")
 
 NSE_BASE_URL = "https://www.nseindia.com"
 FINANCIAL_RESULTS_URL = os.getenv("NSE_FINANCIAL_RESULTS_URL", f"{NSE_BASE_URL}/api/corporates-financial-results")
@@ -76,21 +79,45 @@ def _parse_xbrl_facts(symbol: str, filing: dict[str, Any]) -> list[dict[str, Any
         contexts[context_id] = (start, end, has_dimensions)
 
     concept_map = {
+        # Revenue
+        "RevenueFromOperations": ("profit_loss", "revenue"),
         "Income": ("profit_loss", "revenue"),
-        "InterestEarned": ("profit_loss", "revenue"),
-        "ProfitLossForThePeriod": ("profit_loss", "pat"),
+        "TotalIncome": ("profit_loss", "revenue"),
+        "InterestEarned": ("profit_loss", "revenue"),  # banks/NBFCs
+        # Profit
+        "ProfitBeforeTax": ("profit_loss", "pbt"),
+        "ProfitBeforeExceptionalItemsAndTax": ("profit_loss", "pbt"),
+        "ProfitLossForPeriod": ("profit_loss", "pat"),
+        "ProfitLossFromContinuingOperations": ("profit_loss", "pat"),
         "ProfitLossFromOrdinaryActivitiesAfterTax": ("profit_loss", "pat"),
+        "NetProfitLossForThePeriod": ("profit_loss", "pat"),
+        # EPS
+        "BasicEarningsPerShare": ("profit_loss", "eps"),
+        "BasicEarningsPerShareBeforeExtraordinaryItems": ("profit_loss", "eps"),
         "BasicEarningsPerShareAfterExtraordinaryItems": ("profit_loss", "eps"),
         "DilutedEarningsPerShareAfterExtraordinaryItems": ("profit_loss", "eps"),
-        "OperatingProfitBeforeProvisionAndContingencies": ("profit_loss", "ebitda"),
+        # EBITDA components (non-BFSI companies don't tag EBITDA directly —
+        # we derive it downstream from pbt + depreciation + finance_costs)
+        "FinanceCosts": ("profit_loss", "finance_costs"),
+        "DepreciationDepletionAndAmortisationExpense": ("profit_loss", "depreciation"),
+        "Depreciation": ("profit_loss", "depreciation"),
+        "OperatingProfitBeforeProvisionAndContingencies": ("profit_loss", "ebitda"),  # banks/NBFCs only
+        # Balance sheet
         "TotalAssets": ("balance_sheet", "total_assets"),
+        "EquityShareCapital": ("balance_sheet", "equity_share_capital"),
+        "OtherEquity": ("balance_sheet", "other_equity"),
         "Equity": ("balance_sheet", "equity"),
         "NetWorth": ("balance_sheet", "net_worth"),
         "Borrowings": ("balance_sheet", "borrowings"),
+        "CurrentBorrowings": ("balance_sheet", "borrowings"),
+        "NonCurrentBorrowings": ("balance_sheet", "borrowings"),
         "TotalDebt": ("balance_sheet", "total_debt"),
         "CashAndCashEquivalents": ("balance_sheet", "cash_and_equivalents"),
         "PaidUpValueOfEquityShareCapital": ("balance_sheet", "paid_up_capital"),
         "FaceValueOfEquityShareCapital": ("balance_sheet", "face_value"),
+        # Cash flow (previously not ingested at all)
+        "CashFlowsFromUsedInOperatingActivities": ("cash_flow", "operating_cash_flow"),
+        "NetCashFlowsFromUsedInOperatingActivities": ("cash_flow", "operating_cash_flow"),
     }
     rows: list[dict[str, Any]] = []
     for fact in root:
@@ -168,20 +195,62 @@ def ingest_financial_results(symbols: list[str] | None = None) -> dict[str, Any]
     targets = [s.upper() for s in (symbols or [])]
     if not targets:
         return {"status": "skipped", "imported": 0, "reason": "no symbols supplied"}
+
     imported = 0
+    errors: dict[str, str] = {}
+    sample_filing_keys: list[str] | None = None
+
     for symbol in targets:
         try:
             filings = _fetch_nse_financial_result_csv(symbol)
-            rows: list[dict[str, Any]] = []
-            for filing in filings[:12]:
-                try:
-                    rows.extend(_parse_xbrl_facts(symbol, filing))
-                except (httpx.HTTPError, ET.ParseError, ValueError, KeyError):
-                    continue
-            imported += store_financial_statement_rows(symbol, rows)
-        except (httpx.HTTPError, ValueError, KeyError):
+        except httpx.HTTPStatusError as exc:
+            errors[symbol] = f"HTTP {exc.response.status_code} fetching filings list"
+            logger.warning("NSE financial-results fetch failed for %s: %s", symbol, errors[symbol])
             continue
-    return {"status": "ok", "imported": imported, "symbols": len(targets)}
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            errors[symbol] = f"{type(exc).__name__}: {exc}"
+            logger.warning("NSE financial-results fetch failed for %s: %s", symbol, errors[symbol])
+            continue
+
+        if not filings:
+            errors[symbol] = "NSE returned zero filings (empty list) for this symbol"
+            logger.info("No filings returned for %s", symbol)
+            continue
+
+        if sample_filing_keys is None and isinstance(filings[0], dict):
+            # Capture the real shape NSE gave us once, so we can check our
+            # field-name assumptions (e.g. "xbrl") against reality.
+            sample_filing_keys = sorted(filings[0].keys())
+            logger.info("Sample NSE filing keys for %s: %s", symbol, sample_filing_keys)
+
+        rows: list[dict[str, Any]] = []
+        parse_errors = 0
+        for filing in filings[:20]:
+            try:
+                rows.extend(_parse_xbrl_facts(symbol, filing))
+            except (httpx.HTTPError, ET.ParseError, ValueError, KeyError) as exc:
+                parse_errors += 1
+                logger.info("XBRL parse failed for %s (%s): %s", symbol, filing.get("xbrl"), exc)
+                continue
+
+        if not rows:
+            reason = "no XBRL link on any filing" if all(not f.get("xbrl") for f in filings[:20]) else "XBRL fetched but no known metrics matched"
+            errors[symbol] = f"0 rows parsed ({reason}, {parse_errors} parse errors)"
+        else:
+            imported += store_financial_statement_rows(symbol, rows)
+
+    result: dict[str, Any] = {
+        "status": "ok" if imported else "no_data",
+        "imported": imported,
+        "symbols": len(targets),
+        "failed_symbols": len(errors),
+    }
+    if errors:
+        # Keep the payload small: first 10 errors is enough to diagnose a systemic issue.
+        result["errors"] = dict(list(errors.items())[:10])
+    if sample_filing_keys is not None:
+        result["sample_filing_keys"] = sample_filing_keys
+    return result
 
 
 def parse_corporate_events(symbol: str, payload: list[dict[str, Any]]) -> int:

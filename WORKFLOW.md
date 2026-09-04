@@ -1,3 +1,4 @@
+Terminal 1: docker compose -f docker-compose.yml -f docker-compose.production.yml up --build -d
 Terminal 1: caffeinate -dimsu
 Terminal 2: cloudflared tunnel --url http://localhost:80
 
@@ -9,11 +10,11 @@ MarketPulse is a Dockerized React and FastAPI application for Indian-market anal
 The current application combines:
 
 - Global exchange and macro context
-- Indian index and market breadth data
 - Indian sector intelligence
+- Indian index and market breadth data
+- PostgreSQL signal history
 - Options-chain analytics when the provider is available
 - A rule-based recommendation output
-- PostgreSQL signal history
 - Redis latest-data buffering
 
 This document describes the implementation as it exists today. It also calls out the
@@ -699,3 +700,749 @@ platform. The next engineering layers are:
 5. Add sector-to-constituent driver analysis and NSE/BSE cross-exchange confirmation.
 6. Backtest score weights and recommendation thresholds before using them operationally.
 7. Add authentication, secrets management, monitoring, and audit logging for production.
+
+        Sector Stock Data Collection Plan:
+
+The key principle is:
+
+> **We collect raw financial/market/event data from reliable sources, store it in PostgreSQL, and calculate growth, valuation, risk, ATR, sector-relative metrics, etc. ourselves.**
+
+That gives us much better long-term control.
+
+## The data map for MarketPulse
+
+| Data you need                | Best source for MarketPulse                                 | What we calculate                    |
+| ---------------------------- | ----------------------------------------------------------- | ------------------------------------ |
+| Company financial statements | NSE/BSE filings/XBRL; Stoxim as structured secondary source | Normalized P&L, BS, CF               |
+| Revenue growth               | Financial statements                                        | YoY, QoQ, CAGR                       |
+| Profit growth                | Financial statements                                        | YoY, QoQ, CAGR                       |
+| EPS growth                   | Financial statements / EPS data                             | YoY, QoQ, CAGR                       |
+| P/E                          | Market price + EPS                                          | Current P/E + historical percentile  |
+| EV/EBITDA                    | Financial statements + market cap                           | Current + historical percentile      |
+| Debt                         | Balance sheet                                               | Debt/equity, net debt, leverage      |
+| ROE                          | Financial statements                                        | Current + trend + sector percentile  |
+| ROCE                         | Financial statements                                        | Current + trend + sector percentile  |
+| Cash flow                    | Cash-flow statements                                        | CFO, FCF, CFO/PAT, FCF margin        |
+| Corporate announcements      | NSE/BSE                                                     | Catalyst classification              |
+| Corporate actions            | NSE/BSE                                                     | Dividend, split, bonus, rights, etc. |
+| Peer valuation               | Our database + sector universe                              | Peer median, premium/discount        |
+| Historical sector valuation  | Our database + NSE index valuation data                     | Percentile/Z-score                   |
+| Risk scoring                 | **MarketPulse engine**                                      | Transparent 0–100 score              |
+| ATR                          | NSE OHLC                                                    | ATR 14/20 etc.                       |
+| RSI/EMA/MACD/ADX             | NSE OHLC                                                    | Our technical engine                 |
+| Volume/velocity              | NSE OHLCV                                                   | Our calculations                     |
+
+NSE currently provides financial-result filings with CSV/XBRL options and corporate-announcement data, while its historical-report system provides security-wise price/volume and derivatives data. ([NSE India][1])
+
+---
+
+# 1. Company financial statements
+
+I would make **NSE/BSE the authoritative layer**.
+
+NSE's financial-results section currently supports company/period filtering and CSV/XBRL downloads. ([NSE India][1])
+
+That gives us:
+
+### Profit & Loss
+
+```text
+Revenue
+Operating expenses
+EBITDA / operating profit
+Depreciation
+EBIT
+Interest
+PBT
+Tax
+PAT
+EPS
+```
+
+### Balance Sheet
+
+```text
+Total assets
+Equity
+Borrowings
+Current liabilities
+Cash
+Investments
+Net worth
+```
+
+### Cash Flow
+
+```text
+Cash from operations
+Cash from investing
+Cash from financing
+Capex
+```
+
+For automation, we can use the exchange data directly where practical and/or use a structured secondary source such as Stoxim. Stoxim currently advertises ISIN-keyed APIs covering financials, ratios, shareholding, corporate actions, governance and announcements. ([Stoxim][2])
+
+### Important distinction
+
+I would not store only:
+
+```text
+Revenue = ₹1,250 Cr
+```
+
+We store:
+
+```text
+Company
+Period
+Statement type
+Metric
+Value
+Currency
+Standalone/consolidated
+Source
+Source date
+```
+
+That makes the data auditable.
+
+---
+
+# 2. Revenue / profit / EPS growth
+
+These should be **our calculations**.
+
+For example:
+
+```text
+Revenue Q1 FY26     1,200 Cr
+Revenue Q1 FY27     1,500 Cr
+
+YoY = +25%
+```
+
+We can calculate:
+
+### Revenue
+
+```text
+QoQ
+YoY
+3Y CAGR
+5Y CAGR
+```
+
+### Profit
+
+```text
+QoQ
+YoY
+3Y CAGR
+5Y CAGR
+```
+
+### EPS
+
+```text
+QoQ
+YoY
+3Y CAGR
+```
+
+And then add the metric you were interested in earlier:
+
+## Growth acceleration
+
+Example:
+
+```text
+Revenue growth
+Q1: +8%
+Q2: +14%
+Q3: +19%
+Q4: +27%
+
+Acceleration: STRONG
+```
+
+That becomes part of the stock score.
+
+---
+
+# 3. P/E
+
+We don't actually need a provider to tell us P/E.
+
+We can calculate:
+
+```text
+P/E = Market Price / TTM EPS
+```
+
+Example:
+
+```text
+Price = ₹1,500
+TTM EPS = ₹75
+
+P/E = 20x
+```
+
+Then compare it with:
+
+```text
+Company historical P/E
+Sector median P/E
+Peer median P/E
+NIFTY P/E
+```
+
+NSE also publishes market reports containing P/E ratio data. Its current reports include daily PE-ratio files. ([NSE India][3])
+
+But I prefer to calculate company valuation ourselves where sufficient raw data exists.
+
+---
+
+# 4. EV/EBITDA
+
+Again, this should be ours.
+
+```text
+Enterprise Value
+=
+Market Capitalization
++ Total Debt
+- Cash & Cash Equivalents
+```
+
+Then:
+
+```text
+EV/EBITDA
+=
+Enterprise Value / TTM EBITDA
+```
+
+This is better because we can calculate it consistently for every company and every historical date.
+
+---
+
+# 5. Debt, ROE, ROCE
+
+From the balance sheet and income statement we can derive:
+
+### Debt
+
+```text
+Debt / Equity
+Net Debt
+Net Debt / EBITDA
+Debt / EBITDA
+Interest coverage
+```
+
+### ROE
+
+```text
+ROE = PAT / Average Equity
+```
+
+### ROCE
+
+We'll define a consistent methodology rather than relying blindly on different websites' formulas.
+
+For example:
+
+```text
+ROCE = EBIT / Capital Employed
+```
+
+Then we'll maintain the same formula across the whole database.
+
+That matters because third-party websites can use slightly different definitions.
+
+---
+
+# 6. Cash flow
+
+This should become its own **Cash Flow Quality Score**.
+
+We'll calculate:
+
+```text
+Operating Cash Flow
+Free Cash Flow
+CFO / PAT
+FCF / Revenue
+CFO trend
+FCF trend
+Capex intensity
+```
+
+This lets us identify cases like:
+
+```text
+PAT +30%
+CFO -12%
+
+⚠ Profit growth not translating into cash
+```
+
+versus:
+
+```text
+PAT +30%
+CFO +35%
+
+✓ High-quality earnings
+```
+
+This is very useful for the kind of mid-cap analysis we discussed earlier.
+
+---
+
+# 7. Corporate announcements and catalysts
+
+This should definitely come from the exchanges.
+
+NSE currently exposes live corporate announcements with:
+
+```text
+Symbol
+Company
+Subject
+Details
+Attachment
+XBRL
+Broadcast date/time
+```
+
+and supports filtering by company, subject and time period. ([NSE India][4])
+
+NSE's corporate-filings application also exposes separate areas for announcements, corporate actions and board meetings. ([NSE India][5])
+
+This is excellent for MarketPulse.
+
+We ingest:
+
+```text
+Announcement
+      ↓
+Classification
+      ↓
+Catalyst
+```
+
+For example:
+
+```text
+Order win            +4
+Capacity expansion   +3
+Acquisition          +4
+Fund raising         +2
+Dividend             +1
+Promoter pledge      -4
+Credit downgrade     -5
+Management exit      -3
+Litigation           -3
+```
+
+Then:
+
+```text
+Catalyst Score
+```
+
+And we should store the **original announcement URL/document reference**, so the user can inspect why the signal exists.
+
+---
+
+# 8. Historical peer and sector valuation
+
+This is where I think MarketPulse can become much better than simply copying Screener or another website.
+
+We'll build our own historical valuation warehouse.
+
+Every day/quarter:
+
+```text
+company
+sector
+date
+market_cap
+revenue_ttm
+ebitda_ttm
+pat_ttm
+eps_ttm
+pe
+ev_ebitda
+pb
+roe
+roce
+```
+
+Then we can answer:
+
+### Peer comparison
+
+```text
+Company P/E       18x
+Peer median       24x
+Discount          -25%
+```
+
+### Historical valuation
+
+```text
+Current P/E       18x
+
+5Y:
+10th pct           11x
+Median             19x
+90th pct           28x
+
+Current percentile 47%
+```
+
+### Sector comparison
+
+```text
+Company EV/EBITDA  12x
+Sector median       9x
+
+Premium             +33%
+```
+
+That's much more powerful.
+
+---
+
+# 9. Reliable risk scoring
+
+I would **not buy a third-party risk score**.
+
+MarketPulse should own this.
+
+We'll create:
+
+# MarketPulse Risk Engine
+
+### Financial risk
+
+```text
+Debt/equity
+Net debt/EBITDA
+Interest coverage
+```
+
+### Earnings risk
+
+```text
+Revenue volatility
+PAT volatility
+EPS volatility
+Negative quarters
+```
+
+### Cash-flow risk
+
+```text
+CFO/PAT
+FCF consistency
+```
+
+### Market risk
+
+```text
+ATR
+Volatility
+Maximum drawdown
+Beta
+Liquidity
+```
+
+### Governance/event risk
+
+```text
+Promoter pledge
+Auditor changes
+Regulatory issues
+Major legal events
+Surveillance flags
+```
+
+NSE itself publishes surveillance indicators among its daily reports, while SEBI directs investors toward exchange surveillance and corporate-filing resources. ([NSE India][3])
+
+Then we produce:
+
+```text
+RISK SCORE: 63 / 100
+HIGH RISK
+```
+
+with reasons.
+
+This is much more useful than:
+
+> "Risk = High"
+
+with no explanation.
+
+---
+
+# 10. ATR
+
+This is completely solved without Upstox.
+
+We need:
+
+```text
+Open
+High
+Low
+Close
+```
+
+NSE's historical data infrastructure provides historical security-wise price/volume data, and its archives also provide derivatives contract-wise price/volume data. ([NSE India][6])
+
+Then we calculate ATR ourselves.
+
+For ATR(14):
+
+```text
+TR = max(
+    High - Low,
+    abs(High - Previous Close),
+    abs(Low - Previous Close)
+)
+
+ATR = 14-period moving average of TR
+```
+
+We can then display:
+
+```text
+NIFTY
+ATR(14) = 182.4
+```
+
+and more useful:
+
+```text
+ATR % = ATR / Price × 100
+```
+
+Example:
+
+```text
+ATR = 182
+NIFTY = 24,000
+
+ATR % = 0.76%
+```
+
+That gives us a normalized measure for comparing NIFTY, BANKNIFTY, sectors and individual stocks.
+
+---
+
+# 11. Full technical engine
+
+Once we have OHLCV, we can calculate all of these ourselves:
+
+```text
+ATR
+RSI
+EMA 20
+EMA 50
+EMA 200
+SMA
+MACD
+ADX
+Bollinger Bands
+VWAP
+ROC
+Momentum
+Historical volatility
+Drawdown
+Beta
+Price velocity
+Acceleration
+```
+
+So we don't need an external indicator provider.
+
+This is actually preferable because **every indicator in MarketPulse follows our own consistent formula**.
+
+---
+
+# 12. The really important architecture
+
+I would now divide MarketPulse analytics into:
+
+```text
+                    STOCK INTELLIGENCE
+                            │
+       ┌────────────────────┼────────────────────┐
+       ▼                    ▼                    ▼
+ FUNDAMENTAL             TECHNICAL             EVENT
+   ENGINE                 ENGINE               ENGINE
+       │                    │                    │
+       ├─ Revenue           ├─ OHLC              ├─ Announcements
+       ├─ PAT               ├─ ATR               ├─ Orders
+       ├─ EPS               ├─ RSI               ├─ Acquisitions
+       ├─ ROE               ├─ EMA               ├─ Fund raising
+       ├─ ROCE              ├─ MACD              ├─ Management
+       ├─ Debt              ├─ ADX               └─ Regulatory
+       └─ Cash Flow         └─ Velocity
+                │                │                 │
+                └────────────────┼─────────────────┘
+                                 ▼
+                          VALUATION ENGINE
+                                 │
+                       ┌─────────┴─────────┐
+                       ▼                   ▼
+                   Peer Value         Historical Value
+                       │                   │
+                       └─────────┬─────────┘
+                                 ▼
+                           RISK ENGINE
+                                 │
+                                 ▼
+                         MARKETPULSE SCORE
+```
+
+---
+
+# 13. Then connect it to our Sector Engine
+
+This is where your earlier sector plan comes back.
+
+For example:
+
+```text
+IT Sector
+────────────
+Trend             92
+Momentum          88
+Relative Strength 91
+Breadth           78
+Velocity          83
+
+Sector Score      86
+```
+
+Then:
+
+```text
+INFY
+────────────
+Fundamental       84
+Growth             87
+Technical          92
+Relative Strength  94
+Valuation           76
+Risk                29
+
+Stock Score         88
+```
+
+Then we can say:
+
+> **INFY is strong because both the sector and the stock are strengthening.**
+
+That is considerably more useful than simply saying:
+
+> INFY +1.7%.
+
+---
+
+# 14. And then the derivatives layer
+
+Eventually:
+
+```text
+Sector Score
+      +
+Stock Score
+      +
+Market Score
+      +
+Options Structure
+      +
+OI Flow
+      +
+IV
+      +
+Gamma
+      ↓
+Derivatives Setup
+```
+
+So your original MarketPulse concept becomes a complete hierarchy:
+
+```text
+MARKET
+  ↓
+SECTOR
+  ↓
+STOCK
+  ↓
+DERIVATIVE
+  ↓
+SETUP
+```
+
+---
+
+# My final recommendation on the data sources
+
+For these exact requirements, I'd now lock the architecture to:
+
+### **Primary**
+
+**NSE + BSE**
+
+For exchange-origin data, filings, results, corporate events, historical OHLC, surveillance and market reference information. NSE's current public systems cover financial results, announcements, historical price/volume and daily reports. ([NSE India][1])
+
+### **Secondary structured source**
+
+**Stoxim**
+
+Potentially useful for automating normalized fundamentals because it currently offers an ISIN-keyed REST API covering financials, ratios, corporate actions and announcements. ([Stoxim][2])
+
+### **Reference / manual validation**
+
+**Screener**
+
+Useful for visually checking a company's financial history, ratios and peers, but I would not build our core ETL around scraping it.
+
+### **Our own engines**
+
+This is critical:
+
+```text
+Growth
+Valuation
+Peer comparison
+Sector comparison
+ATR
+Technical indicators
+Velocity
+Risk
+Catalyst score
+Stock score
+Sector score
+```
+
+**We calculate these ourselves.**
+
+That means MarketPulse isn't dependent on a broker API such as Upstox and won't need a daily access-token workflow to preserve the core dataset.
+
+The next step I recommend is to formalize the **MarketPulse Stock Data Schema**: the exact PostgreSQL tables and fields for financial statements, OHLCV, corporate announcements, valuation snapshots, peer relationships and risk metrics. Once that is fixed, we can build the NSE/BSE ingestion without having to redesign the database later.
+
+[1]: https://www.nseindia.com/companies-listing/corporate-filings-financial-results?utm_source=chatgpt.com "Corporate Filings Financial Results - Equity, SME, Debt - NSE India"
+[2]: https://www.stoxim.com/?utm_source=chatgpt.com "Stoxim — Indian Company Financial Data API"
+[3]: https://www.nseindia.com/all-reports/?utm_source=chatgpt.com "All Reports- Equities, Indices, Mutual Fund, Securities Lending & Borrowing, SME - NSE India"
+[4]: https://www.nseindia.com/companies-listing/corporate-filings-announcements?tabIndex=equity&utm_source=chatgpt.com "Corporate Filings Announcement - Equity, SME, Debt, MF - NSE India"
+[5]: https://www.nseindia.com/companies-listing/corporate-filings-application?id=allAnnouncements&utm_source=chatgpt.com "Corporate Filings- Equity, Debt, MF, SME- NSE India"
+[6]: https://www.nseindia.com/static/resources/historical-reports-capital-market-daily-monthly-archives?utm_source=chatgpt.com "Historical Reports - NSE India"

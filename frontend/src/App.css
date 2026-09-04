@@ -211,12 +211,12 @@
 .macro-box span { color: #71829a; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .macro-box strong { display: block; margin-top: 12px; color: #eef5ff; font-size: 18px; }
 .macro-box small { display: block; overflow: hidden; margin-top: 7px; color: #65758c; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+
 .sector-panel {
   padding: 14px;
   border: 1px solid var(--panel-border);
-  background: linear-gradient(135deg, rgba(18,29,43,.86), rgba(10,17,30,.92));
+  background: var(--panel-bg);
   border-radius: 20px;
-  box-shadow: inset 0 1px rgba(255,255,255,.04), 0 18px 36px rgba(8,12,24,.2);
 }
 .rotation-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
 .rotation-strip > div {
@@ -224,15 +224,15 @@
   padding: 14px;
   border: 1px solid var(--panel-border);
   border-radius: 12px;
-  background: linear-gradient(135deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
-}
-.rotation-strip span { display: block; color: #71829a; font-size: 9px; letter-spacing: .1em; }
+  background: rgba(255,255,255,.025);
+}.rotation-strip span { display: block; color: #71829a; font-size: 9px; letter-spacing: .1em; }
+
 .rotation-strip strong { display: block; overflow: hidden; margin-top: 8px; color: #dce8f5; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .sector-table-wrap { overflow-x: auto; }
 .sector-table { display: grid; grid-template-columns: 1.7fr .55fr .7fr .9fr .65fr .7fr; align-items: center; min-width: 720px; gap: 14px; padding: 10px 12px; font-size: 11px; }
 .sector-table-head { color: #65758c; border-bottom: 1px solid rgba(255,255,255,.08); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
 .sector-row { border-bottom: 1px solid rgba(255,255,255,.04); }
-.sector-row { width: 100%; border-top: 0; border-right: 0; border-left: 0; color: inherit; text-align: left; cursor: pointer; }
+.sector-row { width: 100%; border-top: 0; border-right: 0; border-left: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
 .sector-row:hover { background: rgba(67,207,255,.06); }
 .sector-row:last-child { border-bottom: 0; }
 .sector-row strong { display: block; color: #e2edf9; }
@@ -361,7 +361,7 @@
 .empty-state { padding: 22px; color: #71829a; font-size: 11px; }
 
 .app.basic { background: #0a101b; }
-.app.basic .topbar, .app.basic .global-panel, .app.basic .metric-card, .app.basic .breadth-card, .app.basic .watch-card, .app.basic .factor-card, .app.basic .history-panel, .app.basic .derivatives-card, .app.basic .recommendation-card { background: #101a29; backdrop-filter: none; box-shadow: none; }
+.app.basic .topbar, .app.basic .global-panel, .app.basic .metric-card, .app.basic .breadth-card, .app.basic .watch-card, .app.basic .factor-card, .app.basic .history-panel, .app.basic .derivatives-card, .app.basic .recommendation-card, .app.basic .sector-panel, .app.basic .rotation-strip > div { background: #101a29; backdrop-filter: none; box-shadow: none; }
 .app.basic .signal-hero { background: #142238; box-shadow: none; }
 
 .method-note {

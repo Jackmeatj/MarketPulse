@@ -4,3 +4,4 @@ httpx
 psycopg[binary]
 redis
 jugaad-data
+pandas

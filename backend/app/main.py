@@ -1,9 +1,14 @@
-from fastapi import FastAPI, HTTPException
+import os
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from .storage import cached_json, init_storage, latest_overview, read_history, storage_health
 from .derivatives import empty_derivatives
 from .fundamentals import collect_fundamentals
+from .nse_ingestion import canonical_symbols, seed_instrument_master, sync_nse_corporate_events, sync_nse_financial_results, sync_nse_market_data
+from .nse_metrics import recalculate_engine_metrics
 from .sectors import CORE_SECTORS, collect_sectors, unavailable_sector
 from .stocks import collect_sector_stocks
 
@@ -16,7 +21,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -221,6 +226,42 @@ def recommendation(symbol: str = "NIFTY"):
 @app.get("/health/storage")
 def health_storage():
     return storage_health()
+
+
+@app.post("/api/admin/backfill")
+def admin_backfill(symbols: str | None = None, x_admin_token: str | None = Header(default=None)):
+    """Manually trigger NSE price + financial-statement + corporate-event ingestion,
+    bypassing the collector loop's market-hours gate. Useful for local dev/backfill
+    and for diagnosing why a symbol's fundamentals are stuck on 'pending'.
+
+    Optional protection: set ADMIN_API_TOKEN in the environment and pass the same
+    value in an X-Admin-Token header. If ADMIN_API_TOKEN is unset, the endpoint is
+    open (fine for local dev, NOT recommended once this is exposed publicly).
+    """
+    expected_token = os.getenv("ADMIN_API_TOKEN")
+    if expected_token and x_admin_token != expected_token:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-Admin-Token header")
+
+    target_symbols = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else canonical_symbols()
+
+    seeded = seed_instrument_master(target_symbols)
+    price_status = sync_nse_market_data(
+    force=True,
+    symbols=target_symbols,
+    )
+    fiscal_status = sync_nse_financial_results(target_symbols)
+    events_imported = sync_nse_corporate_events(target_symbols)
+    metrics_status = recalculate_engine_metrics(target_symbols)
+
+    return {
+        "status": "ok",
+        "symbols_requested": target_symbols,
+        "instruments_seeded": seeded,
+        "price_sync": price_status,
+        "financial_sync": fiscal_status,
+        "corporate_events_imported": events_imported,
+        "metrics": {"symbols": metrics_status.get("symbols")},
+    }
 
 
 @app.get("/api/sectors")

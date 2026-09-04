@@ -3,40 +3,56 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.production
+    container_name: marketpulse-prod-frontend
     ports:
       - "${PRODUCTION_FRONTEND_PORT:-80}:80"
-    volumes: []
     restart: unless-stopped
+    depends_on:
+      - backend
 
   backend:
-    ports: []
-    volumes: []
+    build:
+      context: ./backend
+    container_name: marketpulse-prod-backend
+    environment:
+      PYTHONUNBUFFERED: "1"
+      OPTIONS_CHAIN_URL: ${OPTIONS_CHAIN_URL:-https://www.nseindia.com/api/option-chain-indices}
     restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
 
   collector:
-    volumes: []
+    build:
+      context: ./backend
+    container_name: marketpulse-prod-collector
+    command: ["python", "-m", "app.collector"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      OPTIONS_CHAIN_URL: ${OPTIONS_CHAIN_URL:-https://www.nseindia.com/api/option-chain-indices}
     restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
 
   postgres:
     image: postgres:16-alpine
-    container_name: marketpulse-postgres
+    container_name: marketpulse-prod-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports: []
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_prod:/var/lib/postgresql/data
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    container_name: marketpulse-redis
-    ports: []
+    container_name: marketpulse-prod-redis
     volumes:
-      - redis_data:/data
+      - redis_data_prod:/data
     restart: unless-stopped
 
 volumes:
-  postgres_data:
-  redis_data:
+  postgres_data_prod:
+  redis_data_prod:

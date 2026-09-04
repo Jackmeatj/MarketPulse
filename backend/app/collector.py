@@ -57,7 +57,7 @@ def run_cycle(cycle_number: int) -> None:
         sectors = with_retries(collect_sectors)
         nse_status = with_retries(sync_nse_market_data, attempts=1)
         symbols = canonical_symbols()
-        fiscal_status = {"status": "ok", "imported": sync_nse_financial_results(symbols), "symbols": len(symbols)}
+        fiscal_status = sync_nse_financial_results(symbols)
         event_status = {"status": "ok", "imported": sync_nse_corporate_events(symbols), "symbols": len(symbols)}
         metric_status = recalculate_engine_metrics()
         options = collect_option_chain() if cycle_number % OPTIONS_EVERY_CYCLES == 0 else {}
